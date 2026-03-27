@@ -1,12 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState } from "react"
 
-
-
-import { Storage } from "@plasmohq/storage";
-
-
-
-
+import { Storage } from "@plasmohq/storage"
 
 const storage = new Storage()
 
@@ -17,45 +11,148 @@ type PromptType = {
 }
 
 export default function IndexPopup() {
-
   const [conversation, setConversation] = useState("")
   const [output, setOutput] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const [prompts, setPrompts] = useState<PromptType[]>([])
 
   const [showForm, setShowForm] = useState(false)
+  const [editId, setEditId] = useState<number | null>(null)
 
   const [newTitle, setNewTitle] = useState("")
   const [newPrompt, setNewPrompt] = useState("")
 
+  /* TIMEZONE */
 
-  /* LOAD PROMPTS */
+  const offsets: any = {
+    IST: 5.5,
+    EST: -5,
+    CST: -6,
+    PST: -8
+  }
+
+  const [zoneTimes, setZoneTimes] = useState<any>({
+    IST: new Date(),
+    EST: new Date(),
+    CST: new Date(),
+    PST: new Date()
+  })
+
+  function syncTimes(baseZone: string, newDate: Date) {
+    const utc = newDate.getTime() - offsets[baseZone] * 3600000
+
+    const updated: any = {}
+
+    Object.keys(offsets).forEach((z) => {
+      updated[z] = new Date(utc + offsets[z] * 3600000)
+    })
+
+    setZoneTimes(updated)
+  }
+
+  /* auto detect IST time */
 
   useEffect(() => {
+    const now = new Date()
 
-    async function loadPrompts() {
+    syncTimes("IST", now)
 
-      const saved = await storage.get<PromptType[]>("prompts")
+    const timer = setInterval(() => {
+      syncTimes("IST", new Date())
+    }, 10000)
 
-      if (saved) {
-        setPrompts(saved)
-      }
-
-    }
-
-    loadPrompts()
-
+    return () => clearInterval(timer)
   }, [])
 
+  function formatTime(d: Date) {
+    return d.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true
+    })
+  }
 
-  /* SAVE PROMPTS */
+  function formatDate(d: Date) {
+    return d.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric"
+    })
+  }
+
+  function parseTime(value: string, zone: string) {
+    if (!value.includes(":")) return
+
+    const parts = value.split(" ")
+
+    if (parts.length < 2) return
+
+    let [time, ampm] = parts
+
+    let [h, m] = time.split(":")
+
+    let hour = parseInt(h)
+
+    if (ampm === "PM" && hour < 12) hour += 12
+    if (ampm === "AM" && hour === 12) hour = 0
+
+    const d = new Date(zoneTimes[zone])
+
+    d.setHours(hour)
+    d.setMinutes(parseInt(m))
+
+    syncTimes(zone, d)
+  }
+
+  /* STORAGE */
+
+  useEffect(() => {
+    async function load() {
+      const saved = await storage.get<PromptType[]>("prompts")
+
+      if (saved) setPrompts(saved)
+    }
+
+    load()
+  }, [])
 
   async function savePrompts(updated: PromptType[]) {
-
     await storage.set("prompts", updated)
 
     setPrompts(updated)
+  }
 
+  /* PROMPT CRUD */
+
+  async function addPrompt() {
+    if (!newTitle || !newPrompt) return
+
+    let updated
+
+    if (editId) {
+      updated = prompts.map((p) =>
+        p.id === editId ? { ...p, title: newTitle, prompt: newPrompt } : p
+      )
+    } else {
+      updated = [
+        ...prompts,
+
+        {
+          id: Date.now(),
+          title: newTitle,
+          prompt: newPrompt
+        }
+      ]
+    }
+
+    await savePrompts(updated)
+
+    setNewTitle("")
+    setNewPrompt("")
+    setEditId(null)
+
+    setShowForm(false)
   }
 
   async function deletePrompt(id: number) {
@@ -64,56 +161,41 @@ export default function IndexPopup() {
     await savePrompts(updated)
   }
 
+  function editPrompt(p: PromptType) {
+    setEditId(p.id)
 
-  /* ADD PROMPT */
+    setNewTitle(p.title)
 
-  async function addPrompt() {
+    setNewPrompt(p.prompt)
 
-    if (!newTitle || !newPrompt) return
-
-    const updated = [
-
-      ...prompts,
-
-      {
-        id: Date.now(),
-        title: newTitle,
-        prompt: newPrompt
-      }
-
-    ]
-
-    await savePrompts(updated)
-
-    setNewTitle("")
-    setNewPrompt("")
-
-    setShowForm(false)
-
+    setShowForm(true)
   }
 
-
-  /* CALL GROK */
+  /* AI CALL */
 
   async function runPrompt(p: PromptType) {
     if (!conversation) {
-      setOutput("Please paste conversation first.")
+      setOutput("Paste conversation first")
 
       return
     }
 
-    setOutput("Generating response...")
+    setLoading(true)
+    setCopied(false)
 
     try {
       const finalPrompt = `
+
 ${p.prompt}
 
 Conversation:
 ${conversation}
+
 `
 
-      const response = await fetch(
+      const res = await fetch(
         "https://api.groq.com/openai/v1/chat/completions",
+
         {
           method: "POST",
 
@@ -136,167 +218,146 @@ ${conversation}
         }
       )
 
-      const data = await response.json()
+      const data = await res.json()
 
-      console.log("groq response", data)
-
-      if (!response.ok) {
-        setOutput("API Error:\n" + JSON.stringify(data, null, 2))
-
-        return
-      }
-
-      setOutput(data.choices?.[0]?.message?.content || "No response returned")
-    } catch (error) {
-      console.log(error)
-
-      setOutput("Request failed. Check console.")
+      setOutput(data.choices?.[0]?.message?.content || "No response")
+    } catch {
+      setOutput("API error")
     }
+
+    setLoading(false)
   }
+
+  /* COPY */
+
+  function copyOutput() {
+    navigator.clipboard.writeText(output)
+
+    setCopied(true)
+
+    setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
+    <div style={styles.container}>
+      <h2 style={styles.title}>echo</h2>
 
-      <div style={styles.container}>
+      <textarea
+        placeholder="Paste support conversation..."
+        value={conversation}
+        onChange={(e) => setConversation(e.target.value)}
+        style={styles.textarea}
+      />
 
-        <h2 style={styles.title}>
-          AI Support Assistant
-        </h2>
+      <div style={styles.promptGrid}>
+        {prompts.map((p) => (
+          <div key={p.id} style={styles.chipWrapper}>
+            <button style={styles.chip} onClick={() => runPrompt(p)}>
+              {p.title}
+            </button>
 
-        <textarea
-            placeholder="Paste support conversation..."
-            value={conversation}
-            onChange={(e)=>setConversation(e.target.value)}
-            style={styles.textarea}
-        />
+            <span style={styles.iconSmall} onClick={() => editPrompt(p)}>
+              ✎
+            </span>
 
-        <div style={styles.promptGrid}>
-
-          {
-            prompts.map(p=>(
-
-                <div key={p.id} style={styles.chipWrapper}>
-
-                  <button
-                      style={styles.chip}
-                      onClick={()=>runPrompt(p)}
-                  >
-                    {p.title}
-                  </button>
-
-                  <span
-                      onClick={()=>deletePrompt(p.id)}
-                      style={styles.deleteIcon}
-                  >
-×
-</span>
-
-                </div>
-
-            ))
-          }
-
-        </div>
-
-
-        {
-            showForm && (
-
-                <div style={styles.card}>
-
-                  <input
-                      placeholder="Button name"
-                      value={newTitle}
-                      onChange={(e)=>setNewTitle(e.target.value)}
-                      style={styles.input}
-                  />
-
-                  <textarea
-                      placeholder="Prompt instructions..."
-                      value={newPrompt}
-                      onChange={(e)=>setNewPrompt(e.target.value)}
-                      style={styles.textareaSmall}
-                  />
-
-                  <div style={{display:"flex", gap:8}}>
-
-                    <button
-                        onClick={addPrompt}
-                        style={styles.primaryBtn}
-                    >
-                      Save Prompt
-                    </button>
-
-                    <button
-                        onClick={()=>{
-                          setShowForm(false)
-                          setNewTitle("")
-                          setNewPrompt("")
-                        }}
-                        style={styles.secondaryBtn}
-                    >
-                      Cancel
-                    </button>
-
-                  </div>
-
-                </div>
-
-            )
-        }
-
-
-        {
-            output && (
-
-                <div style={styles.outputCard}>
-
-                  <div style={styles.outputHeader}>
-
-                    <span>AI Output</span>
-
-                    <button
-                        onClick={()=>navigator.clipboard.writeText(output)}
-                        style={styles.copyBtn}
-                    >
-                      Copy
-                    </button>
-
-                  </div>
-
-                  <div style={styles.outputText}>
-
-                    {output}
-
-                  </div>
-
-                </div>
-
-            )
-        }
-
-
-        <button
-            onClick={()=>setShowForm(!showForm)}
-            style={styles.addBtn}
-        >
-          + Add Prompt
-        </button>
-
-
+            <span style={styles.iconSmall} onClick={() => deletePrompt(p.id)}>
+              ✕
+            </span>
+          </div>
+        ))}
       </div>
 
+      {loading && <div style={styles.loader} />}
+
+      {output && !loading && (
+        <div style={styles.outputCard}>
+          <div style={styles.outputHeader}>
+            <span>Response</span>
+
+            <button onClick={copyOutput} style={styles.iconBtn}>
+              {copied ? "✓" : "📋"}
+            </button>
+          </div>
+
+          <div style={styles.outputText}>{output}</div>
+        </div>
+      )}
+
+      {showForm && (
+        <div style={styles.card}>
+          <input
+            placeholder="Button name"
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            style={styles.input}
+          />
+
+          <textarea
+            placeholder="Prompt instructions"
+            value={newPrompt}
+            onChange={(e) => setNewPrompt(e.target.value)}
+            style={styles.textareaSmall}
+          />
+
+          <div style={styles.row}>
+            <button onClick={addPrompt} style={styles.primaryBtn}>
+              Save
+            </button>
+
+            <button
+              onClick={() => {
+                setShowForm(false)
+
+                setEditId(null)
+              }}
+              style={styles.secondaryBtn}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <button onClick={() => setShowForm(!showForm)} style={styles.addBtn}>
+        + Add Prompt
+      </button>
+
+      <button
+        onClick={() => {
+          setConversation("")
+          setOutput("")
+        }}
+        style={styles.resetBtn}>
+        Reset
+      </button>
+
+      <div style={styles.timeCard}>
+        <div style={styles.timeTitle}>Timezone</div>
+
+        <div style={styles.timeGrid}>
+          {Object.keys(zoneTimes).map((zone) => (
+            <div key={zone} style={styles.timeBox}>
+              <div style={styles.zoneLabel}>{zone}</div>
+
+              <div style={styles.dateText}>{formatDate(zoneTimes[zone])}</div>
+
+              <input
+                value={formatTime(zoneTimes[zone])}
+                onChange={(e) => parseTime(e.target.value, zone)}
+                style={styles.timeInput}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   )
-
 }
-
-
 
 const styles: any = {
   container: {
-    width: 380,
+    width: 460,
 
-    minHeight: 520,
-
-    padding: 16,
+    padding: 14,
 
     background: "#f8fafc",
 
@@ -308,7 +369,7 @@ const styles: any = {
 
     fontWeight: 600,
 
-    marginBottom: 12
+    marginBottom: 10
   },
 
   textarea: {
@@ -322,192 +383,260 @@ const styles: any = {
 
     border: "1px solid #e2e8f0",
 
-    marginBottom: 12,
+    marginBottom: 10,
 
     fontSize: 13,
 
-    background: "#fff"
+    boxSizing: "border-box"
   },
 
-  textareaSmall: {
-    width: "100%",
-
-    height: 70,
-
-    padding: 8,
-
-    borderRadius: 8,
-
-    border: "1px solid #e2e8f0",
-
-    marginBottom: 8,
-
-    fontSize: 13
-  },
-
-  textareaOutput: {
-    width: "100%",
-
-    height: 130,
-
-    padding: 10,
-
-    borderRadius: 10,
-
-    border: "1px solid #e2e8f0",
-
-    fontSize: 13,
-
-    background: "#fff"
-  },
-
-  buttonRow: {
+  promptGrid: {
     display: "flex",
 
     flexWrap: "wrap",
 
     gap: 6,
 
-    marginBottom: 12
+    marginBottom: 10
   },
 
-  primaryBtn: {
-    background: "#2563eb",
+  chipWrapper: {
+    display: "flex",
 
-    color: "#fff",
+    alignItems: "center",
 
+    background: "#eef2ff",
+
+    borderRadius: 20,
+
+    padding: "5px 10px"
+  },
+
+  chip: {
     border: "none",
 
-    padding: "6px 10px",
+    background: "transparent",
 
-    borderRadius: 8,
+    padding: "4px 6px",
 
-    fontSize: 13,
+    cursor: "pointer",
 
-    cursor: "pointer"
+    fontSize: 12
   },
 
-  secondaryBtn: {
-    background: "#e2e8f0",
+  iconSmall: {
+    fontSize: 11,
 
-    border: "none",
+    cursor: "pointer",
 
-    padding: "6px 10px",
+    padding: "0 3px",
 
-    borderRadius: 8,
-
-    fontSize: 13,
-
-    cursor: "pointer"
+    color: "#666"
   },
 
-  card: {
-    border: "1px solid #e2e8f0",
+  outputCard: {
+    border: "1px solid #e5e7eb",
+
+    borderRadius: 12,
 
     padding: 10,
 
-    borderRadius: 10,
+    background: "#fff",
 
-    marginBottom: 12,
+    marginBottom: 10,
 
-    background: "#fff"
+    boxSizing: "border-box"
+  },
+
+  outputHeader: {
+    display: "flex",
+
+    justifyContent: "space-between",
+
+    marginBottom: 6,
+
+    fontSize: 12
+  },
+
+  outputText: {
+    whiteSpace: "pre-wrap",
+
+    fontSize: 13,
+
+    lineHeight: 1.6
+  },
+
+  iconBtn: {
+    border: "none",
+
+    background: "#f1f5f9",
+
+    padding: "2px 6px",
+
+    borderRadius: 6,
+
+    cursor: "pointer"
+  },
+
+  loader: {
+    width: 18,
+    height: 18,
+    border: "2px solid #ddd",
+    borderTop: "2px solid #6366f1",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite",
+    margin: "8px auto"
+  },
+
+  card: {
+    border: "1px solid #e5e7eb",
+
+    padding: 10,
+
+    borderRadius: 12,
+
+    marginBottom: 10,
+
+    background: "#fff",
+
+    boxSizing: "border-box"
   },
 
   input: {
     width: "100%",
 
-    padding: 8,
+    padding: 6,
+
+    marginBottom: 6,
+
+    fontSize: 12
+  },
+
+  textareaSmall: {
+    width: "100%",
+
+    height: 60,
+
+    marginBottom: 6,
+
+    fontSize: 12
+  },
+
+  row: {
+    display: "flex",
+
+    gap: 6
+  },
+
+  primaryBtn: {
+    background: "#6366f1",
+
+    color: "#fff",
+
+    border: "none",
+
+    padding: "4px 8px",
 
     borderRadius: 8,
 
-    border: "1px solid #e2e8f0",
-
-    marginBottom: 8
-  },
-
-  promptItem: {
-    display: "flex",
-    alignItems: "center",
-    gap: 4
-  },
-
-  deleteBtn: {
-    background: "#fee2e2",
-    border: "none",
-    color: "#b91c1c",
-    padding: "4px 6px",
-    borderRadius: 6,
-    cursor: "pointer",
     fontSize: 12
   },
-  promptGrid: {
-    display: "flex",
-    flexWrap: "wrap",
-    gap: 8,
-    marginBottom: 12
-  },
 
-  chipWrapper: {
-    display: "flex",
-    alignItems: "center",
-    background: "#eef2ff",
-    borderRadius: 20,
-    padding: "2px 6px"
-  },
+  secondaryBtn: {
+    background: "#eee",
 
-  chip: {
     border: "none",
-    background: "transparent",
+
     padding: "4px 8px",
-    fontSize: 13,
-    cursor: "pointer"
-  },
 
-  deleteIcon: {
-    fontSize: 12,
-    cursor: "pointer",
-    color: "#6b7280",
-    padding: "0 4px"
-  },
+    borderRadius: 8,
 
-  outputCard: {
-    border: "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding: 12,
-    background: "#fff",
-    marginBottom: 12
-  },
-
-  outputHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    marginBottom: 8,
-    fontSize: 13,
-    fontWeight: 500
-  },
-
-  outputText: {
-    fontSize: 13,
-    whiteSpace: "pre-wrap",
-    lineHeight: 1.4
-  },
-
-  copyBtn: {
-    border: "none",
-    background: "#f1f5f9",
-    padding: "4px 8px",
-    borderRadius: 6,
-    cursor: "pointer",
     fontSize: 12
   },
 
   addBtn: {
     width: "100%",
+
     border: "1px dashed #c7d2fe",
-    background: "#f8fafc",
-    padding: "8px",
+
+    padding: 6,
+
     borderRadius: 10,
-    cursor: "pointer",
-    fontSize: 13
+
+    fontSize: 12,
+
+    marginBottom: 6
+  },
+
+  resetBtn: {
+    width: "100%",
+
+    padding: 5,
+
+    borderRadius: 8,
+
+    border: "1px solid #eee",
+
+    fontSize: 12,
+
+    marginBottom: 10
+  },
+
+  timeCard: {
+    border: "1px solid #e5e7eb",
+
+    borderRadius: 12,
+
+    padding: 8,
+
+    background: "#fff"
+  },
+
+  timeTitle: {
+    fontSize: 12,
+
+    marginBottom: 6,
+
+    fontWeight: 500
+  },
+
+  timeGrid: {
+    display: "grid",
+
+    gridTemplateColumns: "repeat(4,1fr)",
+
+    gap: 4
+  },
+
+  timeBox: {
+    border: "1px solid #eee",
+
+    borderRadius: 8,
+
+    padding: 4,
+
+    textAlign: "center"
+  },
+
+  zoneLabel: {
+    fontSize: 10,
+
+    color: "#666"
+  },
+
+  dateText: {
+    fontSize: 10
+  },
+
+  timeInput: {
+    border: "none",
+
+    fontSize: 11,
+
+    textAlign: "center",
+
+    width: "100%",
+
+    outline: "none"
   }
 }
